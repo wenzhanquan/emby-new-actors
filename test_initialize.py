@@ -6,6 +6,12 @@ from initialize import initialize
 
 
 class SetupTests(unittest.TestCase):
+    def test_custom_loopback_port_is_saved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg,_=initialize(Path(directory),'app',dt.datetime.now(dt.timezone.utc),
+                             lambda c: {'Id':'server'},base_url='http://127.0.0.1:18096/emby')
+            self.assertEqual(cfg['base_url'],'http://127.0.0.1:18096/emby')
+
     def test_new_install_starts_now_and_discovers_server(self):
         with tempfile.TemporaryDirectory() as directory:
             now = dt.datetime(2026, 11, 9, 12, tzinfo=dt.timezone.utc)
