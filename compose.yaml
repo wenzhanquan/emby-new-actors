@@ -1,6 +1,6 @@
 services:
   emby-new-actors:
-    image: wenzhanquan/emby-new-actors:1.0.0
+    image: wenzhanquan/emby-new-actors:latest
     container_name: emby-new-actors
     restart: unless-stopped
     init: true
@@ -35,3 +35,22 @@ services:
     labels:
       com.centurylinklabs.watchtower.enable: "false"
       description: "新增演员增量补全：工作日09:40，跳过历史人物，Strm Assistant升级不覆盖"
+
+  init:
+    image: wenzhanquan/emby-new-actors:latest
+    profiles: [setup]
+    restart: "no"
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["python", "/app/initialize.py"]
+    command:
+      - --api-app-name
+      - ${EMBY_API_APP_NAME:-emby-toolkit}
+      - --base-url
+      - ${EMBY_BASE_URL:-http://127.0.0.1:8096/emby}
+    volumes:
+      - ./:/bootstrap
+      - ${EMBY_DATA_DIR:?Set EMBY_DATA_DIR in .env}:/emby-auth:ro

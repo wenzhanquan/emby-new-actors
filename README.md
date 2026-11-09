@@ -14,46 +14,126 @@
 
 没有 TMDB ID 的人物等待最多七天，仍无ID则标记人工检查；刷新请求被拒绝最多重试三次。`submitted` 表示 Emby 已接收请求，不代表上游一定提供了中文名、简介和照片。本项目调用当前 Emby 元数据提供器，**不完全替代 Strm Assistant 的全库演员去重、别名繁简转换等内部功能**。
 
-## 首次安装
+## Docker Compose 部署（推荐）
 
-下面命令在 **NAS SSH/Linux终端** 中执行。需要 Docker Compose、当前 Emby 的 data 目录，以及 Emby已有 API 密钥对应的应用名称。本项目通过只读认证数据库读取它，不需要把密钥写进Compose或聊天。
+默认镜像为 **`wenzhanquan/emby-new-actors:latest`**，不需要下载Python脚本、不需要本地构建。
 
-### 1. 准备目录和 Compose
+### 1. 准备目录
+
+以下命令在NAS SSH/Linux终端执行，也可通过NAS文件管理器建立目录：
 
 ```sh
 mkdir -p /path/to/emby-new-actors
 cd /path/to/emby-new-actors
+```
+
+### 2. 保存完整的 compose.yaml
+
+将以下内容保存为项目目录下的 `compose.yaml`。`init` 是仅首次部署手动执行的初始化服务，平时只启动 `emby-new-actors`。
+
+```yaml
+services:
+  emby-new-actors:
+    image: wenzhanquan/emby-new-actors:latest
+    container_name: emby-new-actors
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 0.20
+    mem_limit: 192m
+    pids_limit: 32
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./config.docker.json:/config/config.json:ro
+      - ./data:/data
+      - ${EMBY_DATA_DIR:?Set EMBY_DATA_DIR in .env}:/emby-auth:ro
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    healthcheck:
+      test: ["CMD", "python", "/app/scheduler.py", "--healthcheck"]
+      interval: 60s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+      description: "新增演员增量补全：工作日09:40，跳过历史人物，Strm Assistant升级不覆盖"
+
+  init:
+    image: wenzhanquan/emby-new-actors:latest
+    profiles: [setup]
+    restart: "no"
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["python", "/app/initialize.py"]
+    command:
+      - --api-app-name
+      - ${EMBY_API_APP_NAME:-emby-toolkit}
+      - --base-url
+      - ${EMBY_BASE_URL:-http://127.0.0.1:8096/emby}
+    volumes:
+      - ./:/bootstrap
+      - ${EMBY_DATA_DIR:?Set EMBY_DATA_DIR in .env}:/emby-auth:ro
+```
+
+### 3. 保存 .env
+
+在同一目录新建 `.env`，修改下面的路径和应用名称：
+
+```dotenv
+EMBY_DATA_DIR=/你的Emby配置目录/data
+EMBY_API_APP_NAME=emby-toolkit
+EMBY_BASE_URL=http://127.0.0.1:8096/emby
+```
+
+- `EMBY_DATA_DIR` 是包含 **authentication.db** 的管理data目录，不是存放电影的目录。整个目录只读挂载，以便读取SQLite的WAL/SHM。
+- `EMBY_API_APP_NAME` 是Emby后台「高级→API密钥」中已有密钥的**应用名称**。例如创建一个名为 `emby-toolkit` 的应用密钥，这里填这个名字，不要填密钥内容。
+- `EMBY_BASE_URL` 必须使用NAS本机 `127.0.0.1`；Emby映射端口不是8096时在这里修改。
+
+也可从仓库直接下载这两个文件：
+
+```sh
 curl -fL https://raw.githubusercontent.com/wenzhanquan/emby-new-actors/main/compose.yaml -o compose.yaml
 curl -fL https://raw.githubusercontent.com/wenzhanquan/emby-new-actors/main/.env.example -o .env
 ```
 
-修改 `.env`，把 `EMBY_DATA_DIR` 改成你的 Emby 配置下的 **data目录**，里面应有 `authentication.db`。这是 Emby 的管理数据目录，不是电影媒体目录。不要只挂载单个db文件：SQLite还需要读取同目录WAL/SHM。
+下载后仍需按实际情况修改 `.env`。
 
-### 2. 初始化（仅全新部署做一次）
-
-以下示例假定已在 Emby 后台「高级→API密钥」创建名为 `emby-toolkit` 的应用密钥；如名称不同，修改 `--api-app-name`。无需复制或公开密钥本身。
+### 4. 首次初始化并启动
 
 ```sh
-docker pull wenzhanquan/emby-new-actors:1.0.0
-docker run --rm --network host \
-  -v "$PWD:/bootstrap" \
-  -v "/你的Emby配置/data:/emby-auth:ro" \
-  wenzhanquan/emby-new-actors:1.0.0 \
-  python /app/initialize.py --api-app-name emby-toolkit
+# 拉取Docker Hub的latest镜像
+ docker compose pull
+
+# 仅全新安装做一次：自动生成私有配置和进度，历史人物不会回填
+ docker compose --profile setup run --rm init
+
+# 启动常驻调度容器
+ docker compose up -d
+
+# 查看下次执行时间
+ docker compose logs --tail 20 emby-new-actors
 ```
 
-注意上面第二个挂载路径也要换成 `.env` 中填写的实际目录。初始化会自动验证 Emby、读取ServerId，并以**初始化的当前时间**作为边界，不会回填历史。若配置或进度已存在会拒绝覆盖。
+初始化以当前时间为处理边界，生成 `config.docker.json` 和 `data/state.json`。如果已有配置或进度会拒绝覆盖。**从备份恢复时跳过初始化，直接启动。** 不要先启动常驻容器再初始化，否则不存在的配置文件可能被Docker创建成目录。
 
-默认通过NAS本机 `http://127.0.0.1:8096/emby` 连接主Emby，使用host网络，不开放新端口。若端口不同，在初始化命令末尾加 `--base-url http://127.0.0.1:你的端口/emby`，无需修改镜像。它不是公开网页服务。
+启动后在NAS Docker列表中搜索 **emby-new-actors** 即可管理。容器使用host网络，无新端口或网页管理界面；首次启动不立即刷新，工作日09:40才执行，过时不补跑。不要同时启用旧版systemd定时任务。
 
-### 3. 启动
-
-```sh
-docker compose up -d
-docker logs --tail 20 emby-new-actors
-```
-
-现在可在NAS的Docker容器列表找到 **emby-new-actors**。首次启动不会立即执行刷新，日志会显示下次时间。若09:40已过，则下个工作日运行；周末新增的人物留到周一。不要同时启用旧版同名systemd定时任务。
+如果你只使用NAS图形化Compose项目管理：先将上述文件放入项目目录，在该目录执行一次初始化命令，再从界面启动常驻服务；不要在界面直接启用setup profile让初始化服务反复运行。
 
 ## 脚本丢了，怎样恢复
 
@@ -76,7 +156,7 @@ emby-new-actors/
 ## 升级、停用、检查
 
 ```sh
-# 更新到Compose指定版本；需要升级时先修改image版本号
+# 手动拉取最新镜像并重建容器，保留配置和进度
 docker compose pull
 docker compose up -d
 
@@ -90,7 +170,7 @@ docker exec emby-new-actors python /app/refresh_new_actors.py --config /config/c
 docker logs --tail 50 emby-new-actors
 ```
 
-也提供 `latest` 标签，但示例固定版本，避免意外升级。容器已禁止Watchtower自动更新。
+默认使用 `latest` 标签；需要固定版本时可把image改为 `wenzhanquan/emby-new-actors:1.0.0`。容器已禁止Watchtower自动更新，更新时手动执行上面的pull和up命令。
 
 `data/scheduler.json` 中 `next_run` 是下次时间，`last_exit_code` 是最近任务退出码。健康检查主要检查调度状态；健康不等于每个人物都补全成功，Docker本身不会仅因unhealthy自动重启。源资料问题请结合Emby日志判断。
 
